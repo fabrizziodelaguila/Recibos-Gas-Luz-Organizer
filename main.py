@@ -5,159 +5,111 @@ import re
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-import logging
-from PyPDF2 import PdfReader
 import pdfplumber
 from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.ERROR)
+# --- Configuración y utilidades ---
 
 load_dotenv()
-
 carpeta_origen = os.getenv("CARPETA_ORIGEN")
 dest_gas = os.getenv("DEST_GAS")
 dest_luz = os.getenv("DEST_LUZ")
-
-suministros_gas = {}
-suministros_gas_str = os.getenv("SUMINISTROS_GAS", "")
-for s in suministros_gas_str.split(","):
-    s = s.strip()
-    if s:
-        suministros_gas[s] = s
-
+suministros_gas = [s.strip() for s in os.getenv("SUMINISTROS_GAS", "").split(",") if s.strip()]
 suministro_luz = os.getenv("SUMINISTRO_LUZ")
 
-meses = {
-    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
-    5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
-    9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
-}
+MESES = [
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto",
+    "Septiembre", "Octubre", "Noviembre", "Diciembre"
+]
 
 def extraer_texto_pdf(ruta_pdf):
     try:
-        reader = PdfReader(ruta_pdf)
-        texto = ""
-        for page in reader.pages:
-            texto += page.extract_text() or ""
-        return texto
-    except Exception as e:
-        print(f"❌ Error leyendo PDF con PyPDF2: {e}")
-        return ""
-
-def extraer_texto_pdf_pdfplumber(ruta_pdf):
-    try:
         with pdfplumber.open(ruta_pdf) as pdf:
-            texto = ""
-            for page in pdf.pages:
-                texto += page.extract_text() or ""
-        return texto
+            return "".join(page.extract_text() or "" for page in pdf.pages)
     except Exception as e:
-        print(f"❌ Error leyendo PDF con pdfplumber: {e}")
+        print(f"❌ Error leyendo PDF: {e}")
         return ""
 
-def extraer_fecha(texto):
-    match = re.search(r"(\d{2})/(\d{2})/(\d{4})", texto)
+def extraer_fecha(texto, patron, formato):
+    match = re.search(patron, texto)
     if match:
         try:
-            return datetime.strptime(match.group(0), "%d/%m/%Y")
-        except:
-            pass
-    return None
-
-def extraer_fecha_luz(texto):
-    match = re.search(r"\d{2}-[A-Za-z]{3}-\d{4}", texto)
-    if match:
-        try:
-            return datetime.strptime(match.group(0), "%d-%b-%Y")
+            return datetime.strptime(match.group(0), formato)
         except:
             pass
     return None
 
 def obtener_mes_anterior(mes):
-    mes_anterior = mes - 1 if mes > 1 else 12
-    return meses[mes_anterior]
+    return MESES[mes - 2 if mes > 1 else 11]
+
+def mover_archivo(origen, destino):
+    print(f"📦 Moviendo archivo a: {destino}")
+    shutil.move(origen, destino)
+
+# --- Manejo de eventos ---
 
 class Handler(FileSystemEventHandler):
     def on_created(self, event):
-        if event.is_directory:
+        if event.is_directory or not event.src_path.lower().endswith((".pdf", ".tmp")):
+            print("⚠️ Archivo ignorado (no es PDF ni .tmp)")
             return
 
         archivo = os.path.basename(event.src_path)
-        ruta = event.src_path
-        print(f"📥 Nuevo archivo detectado: {ruta}")
-        print(f"🔍 Nombre del archivo detectado: {archivo}")
+        print(f"📥 Nuevo archivo detectado: {archivo}")
 
         if archivo.endswith(".tmp"):
-            print("⏳ Archivo temporal detectado, esperando que se complete la descarga...")
+            print("⏳ Archivo temporal, esperando descarga...")
             time.sleep(5)
-
-            archivos_a_buscar = [f"{suministro_luz}.pdf", "EstadoCuenta.pdf"]
-            encontrado = False
-            for nombre_pdf in archivos_a_buscar:
-                posible_pdf = os.path.join(carpeta_origen, nombre_pdf)
-                if os.path.exists(posible_pdf):
-                    print(f"📄 Archivo {nombre_pdf} detectado tras esperar.")
-                    self.procesar_pdf(posible_pdf)
-                    encontrado = True
-                    break
-
-            if not encontrado:
-                print(f"❌ No se encontró ni '{suministro_luz}.pdf' ni 'EstadoCuenta.pdf' después de esperar.")
-            return
-
-        if archivo.lower().endswith(".pdf"):
-            self.procesar_pdf(ruta)
+            self.buscar_y_procesar([f"{suministro_luz}.pdf", "EstadoCuenta.pdf"])
         else:
-            print("⚠️ Archivo ignorado (no es PDF).")
+            self.procesar_pdf(event.src_path)
+
+    def buscar_y_procesar(self, nombres):
+        for nombre in nombres:
+            ruta = os.path.join(carpeta_origen, nombre)
+            if os.path.exists(ruta):
+                self.procesar_pdf(ruta)
+                return
+        print("❌ No se encontró archivo esperado tras la espera.")
 
     def procesar_pdf(self, ruta):
+        texto = extraer_texto_pdf(ruta)
         archivo = os.path.basename(ruta)
 
+        # Recibo de luz
         if archivo in [f"{suministro_luz}.pdf", "EstadoCuenta.pdf"]:
-            texto = extraer_texto_pdf_pdfplumber(ruta)
-        else:
-            texto = extraer_texto_pdf(ruta)
-
-        if archivo in [f"{suministro_luz}.pdf", "EstadoCuenta.pdf"]:
-            print(f"✅ Archivo coincide con '{archivo}'")
-            fecha = extraer_fecha_luz(texto)
+            fecha = extraer_fecha(texto, r"\d{2}-[A-Za-z]{3}-\d{4}", "%d-%b-%Y")
             if fecha:
                 mes_anterior = obtener_mes_anterior(fecha.month)
                 nuevo_nombre = f"Recibo de luz - {suministro_luz} ({mes_anterior}).pdf"
-                destino = os.path.join(dest_luz, nuevo_nombre)
-                print(f"📦 Moviendo recibo de luz a: {destino}")
-                shutil.move(ruta, destino)
+                mover_archivo(ruta, os.path.join(dest_luz, nuevo_nombre))
             else:
-                print(f"❌ No se pudo extraer fecha del recibo de luz: {ruta}")
+                print("❌ No se pudo extraer fecha de luz.")
             return
-        else:
-            print(f"❌ Archivo no coincide con '{suministro_luz}.pdf' ni 'EstadoCuenta.pdf'. Es: '{archivo}'")
 
+        # Recibo de gas
         if "gas natural" in texto.lower():
-            fecha = extraer_fecha(texto)
-            if not fecha:
-                print(f"❌ No se pudo extraer fecha del recibo de gas: {ruta}")
-                return
-
-            mes_anterior = obtener_mes_anterior(fecha.month)
-            for suministro in suministros_gas:
-                if suministro in texto:
-                    nuevo_nombre = f"Recibo de gas - {suministro} ({mes_anterior}).pdf"
-                    destino = os.path.join(dest_gas, nuevo_nombre)
-                    print(f"📦 Moviendo recibo de gas a: {destino}")
-                    shutil.move(ruta, destino)
-                    return
-
-            print(f"❌ No se encontró ningún suministro conocido en: {ruta}")
+            fecha = extraer_fecha(texto, r"\d{2}/\d{2}/\d{4}", "%d/%m/%Y")
+            if fecha:
+                mes_anterior = obtener_mes_anterior(fecha.month)
+                for suministro in suministros_gas:
+                    if suministro in texto:
+                        nuevo_nombre = f"Recibo de gas - {suministro} ({mes_anterior}).pdf"
+                        mover_archivo(ruta, os.path.join(dest_gas, nuevo_nombre))
+                        return
+                print("❌ No se encontró suministro de gas en el texto.")
+            else:
+                print("❌ No se pudo extraer fecha de gas.")
             return
 
-        print(f"❌ No se pudo identificar tipo o fecha en: {ruta}")
+        print("❌ No se pudo identificar tipo o fecha en el archivo.")
+
+# --- Main ---
 
 if __name__ == "__main__":
     print("🔍 Monitoreando carpeta para nuevos recibos...")
-    event_handler = Handler()
     observer = Observer()
-    observer.schedule(event_handler, carpeta_origen, recursive=False)
+    observer.schedule(Handler(), carpeta_origen, recursive=False)
     observer.start()
     try:
         while True:
