@@ -22,6 +22,11 @@ MESES = [
     "Septiembre", "Octubre", "Noviembre", "Diciembre"
 ]
 
+MESES_ES_EN = {
+    "Ene": "Jan", "Feb": "Feb", "Mar": "Mar", "Abr": "Apr", "May": "May", "Jun": "Jun",
+    "Jul": "Jul", "Ago": "Aug", "Set": "Sep", "Sep": "Sep", "Oct": "Oct", "Nov": "Nov", "Dic": "Dec"
+}
+
 def extraer_texto_pdf(ruta_pdf):
     try:
         with pdfplumber.open(ruta_pdf) as pdf:
@@ -29,6 +34,12 @@ def extraer_texto_pdf(ruta_pdf):
     except Exception as e:
         print(f"❌ Error leyendo PDF: {e}")
         return ""
+
+def traducir_fecha_es(fecha_str):
+    for esp, eng in MESES_ES_EN.items():
+        if esp in fecha_str:
+            return fecha_str.replace(esp, eng)
+    return fecha_str
 
 def extraer_fecha(texto, patron, formato):
     match = re.search(patron, texto)
@@ -39,8 +50,29 @@ def extraer_fecha(texto, patron, formato):
             pass
     return None
 
-def obtener_mes_anterior(mes):
-    return MESES[mes - 2 if mes > 1 else 11]
+def extraer_fecha_luz(texto):
+    match = re.search(r"Fecha de Emisión:\s*(\d{2}-[A-Za-z]{3}-\d{4})", texto)
+    if match:
+        fecha_str = traducir_fecha_es(match.group(1))
+        try:
+            return datetime.strptime(fecha_str, "%d-%b-%Y")
+        except:
+            pass
+    return None
+
+def extraer_fecha_vencimiento(texto):
+    match = re.search(r"Fecha de Vencimiento:\s*(\d{2}-[A-Za-z]{3}-\d{4})", texto)
+    if match:
+        fecha_str = traducir_fecha_es(match.group(1))
+        try:
+            return datetime.strptime(fecha_str, "%d-%b-%Y")
+        except:
+            pass
+    return None
+
+def obtener_mes_facturado(fecha_venc):
+    mes_facturado_index = fecha_venc.month - 2 if fecha_venc.month > 1 else 11
+    return MESES[mes_facturado_index]
 
 def mover_archivo(origen, destino):
     print(f"📦 Moviendo archivo a: {destino}")
@@ -78,23 +110,24 @@ class Handler(FileSystemEventHandler):
 
         # Recibo de luz
         if archivo in [f"{suministro_luz}.pdf", "EstadoCuenta.pdf"]:
-            fecha = extraer_fecha(texto, r"\d{2}-[A-Za-z]{3}-\d{4}", "%d-%b-%Y")
-            if fecha:
-                mes_anterior = obtener_mes_anterior(fecha.month)
-                nuevo_nombre = f"Recibo de luz - {suministro_luz} ({mes_anterior}).pdf"
+            fecha_venc = extraer_fecha_vencimiento(texto)
+            if fecha_venc:
+                print("📅 Fecha de vencimiento detectada:", fecha_venc.strftime("%d/%m/%Y"))
+                mes_facturado = obtener_mes_facturado(fecha_venc)
+                nuevo_nombre = f"Recibo de luz - {suministro_luz} ({mes_facturado}).pdf"
                 mover_archivo(ruta, os.path.join(dest_luz, nuevo_nombre))
             else:
-                print("❌ No se pudo extraer fecha de luz.")
+                print("❌ No se pudo extraer fecha de vencimiento.")
             return
 
         # Recibo de gas
         if "gas natural" in texto.lower():
             fecha = extraer_fecha(texto, r"\d{2}/\d{2}/\d{4}", "%d/%m/%Y")
             if fecha:
-                mes_anterior = obtener_mes_anterior(fecha.month)
+                mes_anterior = fecha.month - 2 if fecha.month > 1 else 11
                 for suministro in suministros_gas:
                     if suministro in texto:
-                        nuevo_nombre = f"Recibo de gas - {suministro} ({mes_anterior}).pdf"
+                        nuevo_nombre = f"Recibo de gas - {suministro} ({MESES[mes_anterior]}).pdf"
                         mover_archivo(ruta, os.path.join(dest_gas, nuevo_nombre))
                         return
                 print("❌ No se encontró suministro de gas en el texto.")
